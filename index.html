@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#6c5ce7">
 <title>Sticker Chart</title>
 <style>
-  :root { --bg:#fff8e7; --card:#fff; --ink:#2d2a4a; --muted:#7a7794; --accent:#6c5ce7; --good:#00b894; --warn:#e17055; }
+  :root { --bg:#fff8e7; --card:#fff; --ink:#2d2a4a; --muted:#7a7794; --good:#00b894; --warn:#e17055; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); }
   header { display:flex; justify-content:space-between; align-items:center; padding:14px 16px 6px; max-width:560px; margin:0 auto; }
@@ -17,8 +17,8 @@
   .card { background:var(--card); border-radius:20px; padding:16px; box-shadow:0 4px 14px rgba(45,42,74,.1); border-top:8px solid var(--c); position:relative; overflow:hidden; }
   .card h2 { margin:0 0 10px; font-size:1.1rem; line-height:1.3; }
   .stickers { min-height:44px; display:flex; flex-wrap:wrap; gap:4px; font-size:1.7rem; margin-bottom:10px; }
-  .stickers span { animation:pop .35s ease-out; }
   .stickers .empty { font-size:.9rem; color:var(--muted); align-self:center; }
+  .stickers span.new { animation:pop .35s ease-out; }
   @keyframes pop { from { transform:scale(0) rotate(-40deg); } to { transform:scale(1) rotate(0); } }
   .bar { height:16px; background:#eee; border-radius:99px; overflow:hidden; }
   .bar > div { height:100%; background:var(--c); border-radius:99px; transition:width .4s; }
@@ -34,14 +34,13 @@
   .rounds { font-size:.8rem; color:var(--muted); margin-top:6px; }
   footer { max-width:560px; margin:0 auto; padding:0 12px 28px; display:flex; gap:8px; flex-wrap:wrap; }
   footer button { flex:1; padding:10px; border:1px solid #ddd; background:#fff; border-radius:10px; font-size:.85rem; color:var(--muted); }
-  .setup { background:#fff; border-radius:16px; padding:16px; font-size:.9rem; line-height:1.5; }
-  .setup code { display:block; background:#f1f1f6; padding:10px; border-radius:8px; overflow-x:auto; font-size:.75rem; margin:8px 0; white-space:pre; }
+  .msg { background:#fff; border-radius:16px; padding:16px; font-size:.9rem; line-height:1.5; }
   .confetti { position:absolute; top:-20px; font-size:1.4rem; animation:fall 1.8s linear forwards; pointer-events:none; }
   @keyframes fall { to { transform:translateY(420px) rotate(360deg); opacity:0; } }
 </style>
 </head>
 <body>
-<header><h1>⭐ Sticker Chart</h1><div id="status">loading…</div></header>
+<header><h1>⭐ Sticker Chart</h1><div id="status">connecting…</div></header>
 <main id="app"></main>
 <footer>
   <button id="copyLink">Copy share link</button>
@@ -50,94 +49,99 @@
   <input id="importFile" type="file" accept="application/json" hidden>
 </footer>
 
-<script>
-/* ---------- Config ----------
-   Leave BLOB_ID empty to let the app try to create its own storage on first
-   load (it then puts the id in the URL hash, so share that link).
-   Once you have an id, paste it here and commit so every device uses the same
-   data with no hash needed. */
-const BLOB_ID = "";
-const API = "https://jsonblob.com/api/jsonBlob";
-const POLL_MS = 5000;
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js";
+import { getDatabase, ref, child, onValue, runTransaction, set } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA5peRMl1-arPeWUfbETbxXTYIYpJOgiLU",
+  authDomain: "sticker-chart-6c0fa.firebaseapp.com",
+  databaseURL: "https://sticker-chart-6c0fa-default-rtdb.firebaseio.com",
+  projectId: "sticker-chart-6c0fa",
+  storageBucket: "sticker-chart-6c0fa.firebasestorage.app",
+  messagingSenderId: "329929065742",
+  appId: "1:329929065742:web:1013f4c59c19a3b832035f"
+};
+
+/* The key is the path your data lives under. It is NOT stored in this file, so
+   it stays out of the public repo. It comes from the link's #hash, is
+   remembered on the device, and is generated on the very first visit.
+   Treat the full link like a password: anyone with it can edit the chart. */
+function getKey() {
+  const fromHash = location.hash.replace("#", "").trim();
+  let key = fromHash;
+  try { if (!key) key = localStorage.getItem("sc_key") || ""; } catch (e) {}
+  if (key.length < 20) {
+    const bytes = crypto.getRandomValues(new Uint8Array(12));
+    key = Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  }
+  try { localStorage.setItem("sc_key", key); } catch (e) {}
+  if (fromHash !== key) history.replaceState(null, "", "#" + key);
+  return key;
+}
+const CHART_KEY = getKey();
+
 const STICKERS = ["⭐","🌟","💫","✨","🌈","🦄","🎈","🍭"];
 const COLORS = ["#6c5ce7","#00b894","#e17055","#0984e3","#fd79a8"];
-
-const DEFAULT_STATE = {
-  v: 1,
-  categories: [
-    { id:"listen", name:"Listening the first time", count:0, goal:10, rounds:0 },
-    { id:"calm",   name:"Being calm when something might upset you", count:0, goal:10, rounds:0 },
-    { id:"try",    name:"Trying something that is new or seems hard", count:0, goal:10, rounds:0 }
-  ]
+const DEFAULTS = {
+  listen: { order:0, name:"Listening the first time", count:0, goal:10, rounds:0 },
+  calm:   { order:1, name:"Being calm when something might upset you", count:0, goal:10, rounds:0 },
+  try:    { order:2, name:"Trying something that is new or seems hard", count:0, goal:10, rounds:0 }
 };
 
 const $ = id => document.getElementById(id);
 const statusEl = $("status");
-let state = null, blobId = null, busy = false, lastJson = "";
+const setStatus = (m, err) => { statusEl.textContent = m; statusEl.className = err ? "err" : ""; };
 
-function setStatus(msg, err) { statusEl.textContent = msg; statusEl.className = err ? "err" : ""; }
+const db = getDatabase(initializeApp(firebaseConfig));
+const catsRef = ref(db, "charts/" + CHART_KEY + "/categories");
 
-/* ---------- Storage (jsonblob.com) ---------- */
-async function remoteGet() {
-  const r = await fetch(`${API}/${blobId}`, { headers:{ Accept:"application/json" }, cache:"no-store" });
-  if (!r.ok) throw new Error("GET " + r.status);
-  return r.json();
-}
-async function remotePut(data) {
-  const r = await fetch(`${API}/${blobId}`, {
-    method:"PUT",
-    headers:{ "Content-Type":"application/json", Accept:"application/json" },
-    body: JSON.stringify(data)
-  });
-  if (!r.ok) throw new Error("PUT " + r.status);
-}
-async function remoteCreate() {
-  const r = await fetch(API, {
-    method:"POST",
-    headers:{ "Content-Type":"application/json", Accept:"application/json" },
-    body: JSON.stringify(DEFAULT_STATE)
-  });
-  if (!r.ok) throw new Error("POST " + r.status);
-  const loc = r.headers.get("Location"); // may be hidden by CORS
-  if (!loc) throw new Error("no Location header");
-  return loc.split("/").pop();
+let cats = null;
+const prevCounts = {};
+const celebrated = new Set();
+
+/* Atomic update of one category, so two phones tapping at once both count. */
+function update(id, fn) {
+  runTransaction(child(catsRef, id), cur => {
+    if (cur === null) return cur;
+    fn(cur);
+    return cur;
+  }).catch(() => setStatus("couldn't save, try again", true));
 }
 
-/* Read-modify-write against the latest remote copy to keep lost updates rare. */
-async function mutate(fn) {
-  if (busy) return;
-  busy = true;
-  try {
-    const fresh = await remoteGet();
-    fn(fresh);
-    await remotePut(fresh);
-    state = fresh; lastJson = JSON.stringify(fresh);
-    localStorage.setItem("sc_cache", lastJson);
-    setStatus("synced"); render();
-  } catch (e) {
-    setStatus("couldn't save, try again", true);
-  } finally { busy = false; }
-}
+onValue(ref(db, ".info/connected"), s => {
+  if (s.val() === true) setStatus("live");
+  else setStatus("offline, changes will sync when back", true);
+});
 
-async function poll() {
-  if (busy || !blobId) return;
-  try {
-    const fresh = await remoteGet();
-    const j = JSON.stringify(fresh);
-    if (j !== lastJson) { state = fresh; lastJson = j; localStorage.setItem("sc_cache", j); render(); }
-    setStatus("synced");
-  } catch (e) { setStatus("offline, showing last saved", true); }
-}
+onValue(catsRef, snap => {
+  const v = snap.val();
+  if (!v) {
+    // First run: create the three starting categories (only if still empty).
+    runTransaction(catsRef, cur => cur === null ? DEFAULTS : cur)
+      .catch(() => showMsg("Could not reach the database. Check that the database rules were published, then reload."));
+    return;
+  }
+  cats = v;
+  render();
+}, err => {
+  showMsg("Could not read the database (" + err.code + "). Check the database rules, then reload.");
+  setStatus("can't reach database", true);
+});
 
-/* ---------- Rendering ---------- */
+function showMsg(t) { const d = document.createElement("div"); d.className = "msg"; d.textContent = t; $("app").replaceChildren(d); }
+
 function render() {
   const app = $("app");
   app.innerHTML = "";
-  state.categories.forEach((c, i) => {
+  Object.entries(cats).sort((a, b) => (a[1].order || 0) - (b[1].order || 0)).forEach(([id, c], i) => {
     const color = COLORS[i % COLORS.length];
     const emoji = STICKERS[(c.rounds || 0) % STICKERS.length];
-    const reached = c.count >= c.goal;
-    const pct = Math.min(100, Math.round(c.count / c.goal * 100));
+    const count = c.count || 0, goal = Math.max(1, c.goal || 10);
+    const reached = count >= goal;
+    const pct = Math.min(100, Math.round(count / goal * 100));
+    const prev = prevCounts[id] ?? count;
+    prevCounts[id] = count;
 
     const card = document.createElement("section");
     card.className = "card"; card.style.setProperty("--c", color);
@@ -145,41 +149,46 @@ function render() {
     const h = document.createElement("h2"); h.textContent = c.name; card.appendChild(h);
 
     const row = document.createElement("div"); row.className = "stickers";
-    if (c.count === 0) { const e = document.createElement("span"); e.className = "empty"; e.textContent = "No stickers yet"; row.appendChild(e); }
-    for (let k = 0; k < c.count; k++) { const s = document.createElement("span"); s.textContent = emoji; row.appendChild(s); }
+    if (count === 0) { const e = document.createElement("span"); e.className = "empty"; e.textContent = "No stickers yet"; row.appendChild(e); }
+    for (let k = 0; k < count; k++) {
+      const s = document.createElement("span"); s.textContent = emoji;
+      if (k >= prev) s.className = "new";
+      row.appendChild(s);
+    }
     card.appendChild(row);
 
     const bar = document.createElement("div"); bar.className = "bar";
-    bar.innerHTML = '<div style="width:' + pct + '%"></div>'; card.appendChild(bar);
+    const fill = document.createElement("div"); fill.style.width = pct + "%"; bar.appendChild(fill);
+    card.appendChild(bar);
 
     const meta = document.createElement("div"); meta.className = "meta";
-    const cnt = document.createElement("span"); cnt.textContent = c.count + " of " + c.goal;
-    const goal = document.createElement("span"); goal.className = "goal";
-    const minus = document.createElement("button"); minus.textContent = "−"; minus.setAttribute("aria-label","Lower goal");
-    const plus = document.createElement("button"); plus.textContent = "+"; plus.setAttribute("aria-label","Raise goal");
-    const gl = document.createElement("span"); gl.textContent = "goal";
-    minus.onclick = () => mutate(s => { const x = s.categories[i]; x.goal = Math.max(1, x.goal - 1); });
-    plus.onclick  = () => mutate(s => { const x = s.categories[i]; x.goal = Math.min(50, x.goal + 1); });
-    goal.append(gl, minus, plus);
-    meta.append(cnt, goal); card.appendChild(meta);
+    const cnt = document.createElement("span"); cnt.textContent = count + " of " + goal;
+    const gl = document.createElement("span"); gl.className = "goal";
+    const lbl = document.createElement("span"); lbl.textContent = "goal";
+    const minus = document.createElement("button"); minus.textContent = "−"; minus.setAttribute("aria-label", "Lower goal");
+    const plus = document.createElement("button"); plus.textContent = "+"; plus.setAttribute("aria-label", "Raise goal");
+    minus.onclick = () => update(id, x => { x.goal = Math.max(1, (x.goal || 10) - 1); });
+    plus.onclick = () => update(id, x => { x.goal = Math.min(50, (x.goal || 10) + 1); });
+    gl.append(lbl, minus, plus);
+    meta.append(cnt, gl); card.appendChild(meta);
 
     if (reached) {
       const d = document.createElement("div"); d.className = "done";
       d.textContent = "🎉 Goal reached! Time to celebrate! 🎉";
       const b = document.createElement("button"); b.textContent = "Start a new chart";
-      b.onclick = () => mutate(s => { const x = s.categories[i]; x.count = 0; x.rounds = (x.rounds || 0) + 1; });
+      b.onclick = () => update(id, x => { x.count = 0; x.rounds = (x.rounds || 0) + 1; });
       d.appendChild(document.createElement("br")); d.appendChild(b);
       card.appendChild(d);
-      if (!card.dataset.shown) burst(card);
-    }
+      if (!celebrated.has(id)) { celebrated.add(id); burst(card); }
+    } else celebrated.delete(id);
 
     const add = document.createElement("button"); add.className = "add"; add.textContent = emoji + "  Add Sticker";
-    add.onclick = () => mutate(s => { s.categories[i].count += 1; });
+    add.onclick = () => update(id, x => { x.count = (x.count || 0) + 1; });
     card.appendChild(add);
 
     const r2 = document.createElement("div"); r2.className = "row";
     const undo = document.createElement("button"); undo.className = "small"; undo.textContent = "Undo last";
-    undo.onclick = () => mutate(s => { const x = s.categories[i]; x.count = Math.max(0, x.count - 1); });
+    undo.onclick = () => update(id, x => { x.count = Math.max(0, (x.count || 0) - 1); });
     r2.appendChild(undo); card.appendChild(r2);
 
     if (c.rounds) { const rd = document.createElement("div"); rd.className = "rounds"; rd.textContent = "Charts completed: " + c.rounds; card.appendChild(rd); }
@@ -188,7 +197,6 @@ function render() {
 }
 
 function burst(card) {
-  card.dataset.shown = "1";
   for (let n = 0; n < 18; n++) {
     const s = document.createElement("span"); s.className = "confetti";
     s.textContent = ["🎉","⭐","✨","🎈"][n % 4];
@@ -197,46 +205,14 @@ function burst(card) {
   }
 }
 
-function showSetup(reason) {
-  $("app").innerHTML = '<div class="setup"><b>One-time setup needed</b><br>' +
-    'The app could not create its storage automatically (' + reason + '). Run this once in any terminal:' +
-    '<code>curl -si -X POST -H "Content-Type: application/json" -H "Accept: application/json" \\\n  -d \'' + JSON.stringify(DEFAULT_STATE).replace(/'/g, "") + '\' \\\n  https://jsonblob.com/api/jsonBlob</code>' +
-    'Copy the id from the <i>Location</i> header (the last part of the URL), then either paste it into <b>BLOB_ID</b> at the top of index.html and commit, or open this page with <b>#</b> and the id on the end.</div>';
-  setStatus("needs setup", true);
-}
-
-/* ---------- Boot ---------- */
-async function boot() {
-  blobId = BLOB_ID || location.hash.replace("#", "") || localStorage.getItem("sc_blob") || "";
-  if (!blobId) {
-    try {
-      blobId = await remoteCreate();
-    } catch (e) { return showSetup(e.message); }
-  }
-  localStorage.setItem("sc_blob", blobId);
-  if (!BLOB_ID && location.hash.replace("#", "") !== blobId) history.replaceState(null, "", "#" + blobId);
-
-  const cached = localStorage.getItem("sc_cache");
-  if (cached) { try { state = JSON.parse(cached); lastJson = cached; render(); } catch (e) {} }
-  try {
-    state = await remoteGet(); lastJson = JSON.stringify(state);
-    localStorage.setItem("sc_cache", lastJson); render(); setStatus("synced");
-  } catch (e) {
-    if (!state) { setStatus("can't reach storage", true); $("app").innerHTML = '<div class="setup">Could not load the chart. Check your connection and reload.</div>'; return; }
-    setStatus("offline, showing last saved", true);
-  }
-  setInterval(poll, POLL_MS);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
-}
-
-/* ---------- Footer actions ---------- */
 $("copyLink").onclick = async () => {
-  const url = BLOB_ID ? location.href.split("#")[0] : location.href.split("#")[0] + "#" + blobId;
-  try { await navigator.clipboard.writeText(url); setStatus("link copied"); } catch (e) { prompt("Copy this link:", url); }
+  const url = location.href.split("#")[0] + "#" + CHART_KEY;
+  try { await navigator.clipboard.writeText(url); setStatus("link copied"); }
+  catch (e) { prompt("Copy this link:", url); }
 };
 $("exportBtn").onclick = () => {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type:"application/json" }));
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(cats, null, 2)], { type:"application/json" }));
   a.download = "sticker-chart-backup.json"; a.click();
 };
 $("importBtn").onclick = () => $("importFile").click();
@@ -244,13 +220,11 @@ $("importFile").onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const data = JSON.parse(await f.text());
-    if (!Array.isArray(data.categories)) throw new Error("bad file");
-    if (confirm("Replace current stickers with this backup?")) mutate(s => { s.categories = data.categories; });
+    if (typeof data !== "object" || !Object.values(data).every(c => typeof c.name === "string")) throw new Error("bad");
+    if (confirm("Replace current stickers with this backup?")) await set(catsRef, data);
   } catch (err) { setStatus("invalid backup file", true); }
   e.target.value = "";
 };
-
-boot();
 </script>
 </body>
 </html>
